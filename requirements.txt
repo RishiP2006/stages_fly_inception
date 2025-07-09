@@ -1,0 +1,11 @@
+streamlit==1.35.0
+tensorflow==2.16.1
+keras==3.3.3
+Pillow
+numpy
+huggingface-hub
+streamlit-webrtc
+av
+torch==2.0.1
+torchvision==0.15.2
+opencv-python-headless
