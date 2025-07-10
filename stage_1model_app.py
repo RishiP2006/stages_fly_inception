@@ -47,9 +47,9 @@ def beep_base64():
         f.setnchannels(1)
         f.setsampwidth(2)
         f.setframerate(44100)
-        duration = 0.2
-        freq = 880
-        volume = 0.8
+        duration = 0.9
+        freq = 660
+        volume = 0.9
         samples = [
             int(volume * 32767 * np.sin(2 * np.pi * freq * t / 44100))
             for t in range(int(44100 * duration))
