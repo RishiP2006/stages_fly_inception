@@ -3,13 +3,14 @@ import numpy as np
 from PIL import Image, ImageDraw
 from huggingface_hub import hf_hub_download
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
-import av, io, wave, struct, time
+import av
+import time
 
 st.set_page_config(page_title="Drosophila Stage Detection", layout="centered")
 st.title("🪰 Drosophila Stage Detection")
-st.write("Upload an image or use your webcam. Select a stage, and hear a beep when it matches!")
+st.write("Upload an image or use your webcam. Select a stage, and get a BIG visual ALERT when it matches!")
 
-# --- Config ---
+# --- Model & Labels ---
 HF_REPO_ID = "RishiPTrial/my-model-name"
 MODEL_FILE = "drosophila_inceptionv3_classifier.h5"
 STAGE_LABELS = [
@@ -17,29 +18,14 @@ STAGE_LABELS = [
     "white pupa","brown pupa","eye pupa"
 ]
 
-# --- Dropdown ---
+# --- Dropdown target stage ---
 selected_stage = st.selectbox("🎯 Select stage to alert on:", STAGE_LABELS)
 
-# --- Generate beep WAV once ---
-def make_beep_wav(duration=0.2, freq=800, sr=44100, volume=0.8):
-    buf = io.BytesIO()
-    with wave.open(buf, 'wb') as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(sr)
-        samples = (volume * np.sin(2*np.pi*freq*np.arange(sr*duration)/sr)).astype(np.float32)
-        # convert to int16
-        ints = (samples * 32767).astype(np.int16)
-        wf.writeframes(ints.tobytes())
-    return buf.getvalue()
+# --- Session flag for live match alert ---
+if "live_alert" not in st.session_state:
+    st.session_state["live_alert"] = False
 
-beep_wav = make_beep_wav(duration=0.2, freq=800)
-
-# --- Session flag for live beep ---
-if 'beep_live' not in st.session_state:
-    st.session_state['beep_live'] = False
-
-# --- Load model from HF ---
+# --- Load Keras Model ---
 @st.cache_resource
 def load_model():
     path = hf_hub_download(repo_id=HF_REPO_ID, filename=MODEL_FILE)
@@ -51,12 +37,12 @@ model, input_size = load_model()
 # --- Helpers ---
 from tensorflow.keras.applications.inception_v3 import preprocess_input
 def preprocess_image(img):
-    img = img.resize((input_size,input_size)).convert("RGB")
+    img = img.resize((input_size, input_size)).convert("RGB")
     arr = np.asarray(img, np.float32)
     return preprocess_input(arr)
 
 def predict(arr):
-    pred = model.predict(arr[np.newaxis,:,:,:], verbose=0)[0]
+    pred = model.predict(arr[np.newaxis], verbose=0)[0]
     idx = int(np.argmax(pred))
     return STAGE_LABELS[idx], float(pred[idx])
 
@@ -69,26 +55,31 @@ if uploaded:
     arr = preprocess_image(img)
     label, conf = predict(arr)
     st.success(f"Prediction: {label} ({conf:.1%})")
-    if label == selected_stage:
-        st.audio(beep_wav, format='audio/wav')
 
 # --- Live camera section ---
 st.subheader("📹 Live Camera Detection")
+video_box = st.empty()             # placeholder for video
+alert_box = st.empty()             # placeholder for alert banner
 
 class CamProcessor(VideoProcessorBase):
     def __init__(self):
         self.last = 0
-    def recv(self, frame):
+    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img = frame.to_ndarray(format="rgb24")
         pil = Image.fromarray(img)
         arr = preprocess_image(pil)
         label, conf = predict(arr)
+
+        # Draw prediction text
         draw = ImageDraw.Draw(pil)
         draw.text((10,10), f"{label} {conf:.0%}", fill="red")
+
+        # Trigger visual alert if match and cooldown >1s
         now = time.time()
         if label == selected_stage and now - self.last > 1.0:
             self.last = now
-            st.session_state['beep_live'] = True
+            st.session_state["live_alert"] = True
+
         return av.VideoFrame.from_ndarray(np.array(pil), format="rgb24")
 
 webrtc_streamer(
@@ -96,14 +87,22 @@ webrtc_streamer(
     mode=WebRtcMode.SENDRECV,
     media_stream_constraints={"video":True, "audio":False},
     video_processor_factory=CamProcessor,
-    async_processing=True
+    async_processing=True,
+    video_frame_callback=lambda frame: video_box.image(frame.to_ndarray(format="rgb24"))
 )
 
-# After camera, if beep flag, play and rerun
-if st.session_state['beep_live']:
-    st.session_state['beep_live'] = False
-    st.audio(beep_wav, format='audio/wav')
-    st.experimental_rerun()
+# --- Show visual alert if flagged ---
+if st.session_state["live_alert"]:
+    alert_box.markdown(
+        "<div style='background-color:#ff4b4b;color:white;padding:20px;"
+        "font-size:32px;text-align:center;border-radius:8px;'>"
+        "🚨 MATCHED: " + selected_stage.upper() + " 🚨</div>",
+        unsafe_allow_html=True
+    )
+    # Clear after 1 second
+    time.sleep(1.0)
+    alert_box.empty()
+    st.session_state["live_alert"] = False
 
 st.markdown("---")
 st.write(f"Model: `{HF_REPO_ID}/{MODEL_FILE}`")
