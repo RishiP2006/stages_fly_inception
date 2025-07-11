@@ -22,29 +22,27 @@ STAGE_LABELS = [
 # --- Dropdown target stage ---
 selected_stage = st.selectbox("🎯 Select stage to alert on:", STAGE_LABELS)
 
-# --- Beep generator ---
+# --- Beep helper ---
 def beep_base64():
     import io, wave, struct
     buffer = io.BytesIO()
-    with wave.open(buffer,'wb') as f:
-        f.setnchannels(1); f.setsampwidth(2); f.setframerate(44100)
+    with wave.open(buffer, 'wb') as f:
+        f.setnchannels(1)
+        f.setsampwidth(2)
+        f.setframerate(44100)
         duration, freq, volume = 0.6, 660, 0.8
-        samples = [int(volume*32767*np.sin(2*np.pi*freq*t/44100))
-                   for t in range(int(44100*duration))]
+        samples = [
+            int(volume * 32767 * np.sin(2 * np.pi * freq * t / 44100))
+            for t in range(int(44100 * duration))
+        ]
         f.writeframes(b''.join(struct.pack('<h', s) for s in samples))
     return base64.b64encode(buffer.getvalue()).decode()
-
-beep_html = f"""
-<audio autoplay>
-  <source src="data:audio/wav;base64,{beep_base64()}" type="audio/wav">
-</audio>
-"""
 
 # Initialize session state for live beeps
 if 'beep_live' not in st.session_state:
     st.session_state['beep_live'] = False
 
-# --- Load Keras model ---
+# --- Load Keras model from HF ---
 @st.cache_resource(show_spinner=False)
 def load_model():
     path = hf_hub_download(repo_id=HF_REPO_ID, filename=MODEL_FILE)
@@ -54,19 +52,19 @@ def load_model():
 model_info = load_model()
 model = model_info["model"]
 
-# --- Preprocess & classify ---
+# --- Preprocess & classify helpers ---
 def preprocess_image(img, size):
     from tensorflow.keras.applications.inception_v3 import preprocess_input
-    arr = img.resize((size,size)).convert("RGB")
+    arr = img.resize((size, size)).convert("RGB")
     x = np.asarray(arr, np.float32)
     return preprocess_input(x)
 
 def classify(arr):
-    preds = model.predict(np.expand_dims(arr,0))
+    preds = model.predict(np.expand_dims(arr, 0))
     idx = int(np.argmax(preds, axis=1)[0])
     return STAGE_LABELS[idx], float(preds[0][idx])
 
-# --- Image upload section ---
+# --- Upload image section ---
 st.subheader("📷 Upload Image")
 file = st.file_uploader("", type=["jpg","jpeg","png"])
 if file:
@@ -76,7 +74,13 @@ if file:
     label, conf = classify(arr)
     st.success(f"Prediction: {label} ({conf:.1%})")
     if label == selected_stage:
-        st.components.v1.html(beep_html, height=0)
+        # Play beep via JS
+        st.write(
+            f"<script>"
+            f"new Audio('data:audio/wav;base64,{beep_base64()}').play();"
+            f"</script>",
+            unsafe_allow_html=True
+        )
 
 # --- Live webcam section ---
 st.subheader("📹 Live Camera Detection")
@@ -92,11 +96,11 @@ class LiveProcessor(VideoProcessorBase):
         arr = preprocess_image(pil, self.size)
         label, conf = classify(arr)
 
-        # Draw label
+        # Draw prediction
         draw = ImageDraw.Draw(pil)
-        draw.text((10,10), f"{label} {conf:.0%}", fill="red")
+        draw.text((10, 10), f"{label} ({conf:.0%})", fill="red")
 
-        # If match and cooldown passed, trigger session state
+        # If match and cooldown passed, set flag
         now = time.time()
         if label == selected_stage and (now - self.last_time) > 2:
             self.last_time = now
@@ -112,10 +116,16 @@ ctx = webrtc_streamer(
     async_processing=True
 )
 
-# After the streamer, check if we need to beep
+# After rendering the video, check for beep flag
 if st.session_state['beep_live']:
     st.session_state['beep_live'] = False
-    st.components.v1.html(beep_html, height=0)
+    # Inject JS to play beep
+    st.write(
+        f"<script>"
+        f"new Audio('data:audio/wav;base64,{beep_base64()}').play();"
+        f"</script>",
+        unsafe_allow_html=True
+    )
 
 st.markdown("---")
 st.write(f"Model: `{HF_REPO_ID}/{MODEL_FILE}`")
