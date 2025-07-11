@@ -4,7 +4,9 @@ from PIL import Image, ImageDraw
 from huggingface_hub import hf_hub_download
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
 import av
-import base64
+import io
+import wave
+import struct
 import time
 
 st.set_page_config(page_title="Drosophila Stage Detection (Live + Upload)", layout="centered")
@@ -22,27 +24,26 @@ STAGE_LABELS = [
 # --- Dropdown target stage ---
 selected_stage = st.selectbox("🎯 Select stage to alert on:", STAGE_LABELS)
 
-# --- Beep helper ---
-def beep_base64():
-    import io, wave, struct
-    buffer = io.BytesIO()
-    with wave.open(buffer, 'wb') as f:
-        f.setnchannels(1)
-        f.setsampwidth(2)
-        f.setframerate(44100)
-        duration, freq, volume = 0.6, 660, 0.8
+# --- Prepare beep WAV data once ---
+def make_beep_wav(duration=0.6, freq=660, volume=0.8, sr=44100):
+    buf = io.BytesIO()
+    with wave.open(buf, 'wb') as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sr)
         samples = [
-            int(volume * 32767 * np.sin(2 * np.pi * freq * t / 44100))
-            for t in range(int(44100 * duration))
+            int(volume * 32767 * np.sin(2 * np.pi * freq * t / sr))
+            for t in range(int(sr * duration))
         ]
-        f.writeframes(b''.join(struct.pack('<h', s) for s in samples))
-    return base64.b64encode(buffer.getvalue()).decode()
+        wf.writeframes(b''.join(struct.pack('<h', s) for s in samples))
+    return buf.getvalue()
 
-# Initialize session state for live beeps
+beep_wav = make_beep_wav()
+
 if 'beep_live' not in st.session_state:
     st.session_state['beep_live'] = False
 
-# --- Load Keras model from HF ---
+# --- Load model ---
 @st.cache_resource(show_spinner=False)
 def load_model():
     path = hf_hub_download(repo_id=HF_REPO_ID, filename=MODEL_FILE)
@@ -60,11 +61,11 @@ def preprocess_image(img, size):
     return preprocess_input(x)
 
 def classify(arr):
-    preds = model.predict(np.expand_dims(arr, 0))
+    preds = model.predict(np.expand_dims(arr, 0), verbose=0)
     idx = int(np.argmax(preds, axis=1)[0])
     return STAGE_LABELS[idx], float(preds[0][idx])
 
-# --- Upload image section ---
+# --- Image upload section ---
 st.subheader("📷 Upload Image")
 file = st.file_uploader("", type=["jpg","jpeg","png"])
 if file:
@@ -74,13 +75,7 @@ if file:
     label, conf = classify(arr)
     st.success(f"Prediction: {label} ({conf:.1%})")
     if label == selected_stage:
-        # Play beep via JS
-        st.write(
-            f"<script>"
-            f"new Audio('data:audio/wav;base64,{beep_base64()}').play();"
-            f"</script>",
-            unsafe_allow_html=True
-        )
+        st.audio(beep_wav, format="audio/wav", start_time=0)
 
 # --- Live webcam section ---
 st.subheader("📹 Live Camera Detection")
@@ -96,12 +91,11 @@ class LiveProcessor(VideoProcessorBase):
         arr = preprocess_image(pil, self.size)
         label, conf = classify(arr)
 
-        # Draw prediction
         draw = ImageDraw.Draw(pil)
         draw.text((10, 10), f"{label} ({conf:.0%})", fill="red")
 
-        # If match and cooldown passed, set flag
         now = time.time()
+        # match + 2s cooldown
         if label == selected_stage and (now - self.last_time) > 2:
             self.last_time = now
             st.session_state['beep_live'] = True
@@ -116,16 +110,12 @@ ctx = webrtc_streamer(
     async_processing=True
 )
 
-# After rendering the video, check for beep flag
+# --- After streaming, if flag is set, play beep and rerun ---
 if st.session_state['beep_live']:
     st.session_state['beep_live'] = False
-    # Inject JS to play beep
-    st.write(
-        f"<script>"
-        f"new Audio('data:audio/wav;base64,{beep_base64()}').play();"
-        f"</script>",
-        unsafe_allow_html=True
-    )
+    st.audio(beep_wav, format="audio/wav", start_time=0)
+    # Force a rerun so that the audio component is attached to a fresh render
+    st.experimental_rerun()
 
 st.markdown("---")
 st.write(f"Model: `{HF_REPO_ID}/{MODEL_FILE}`")
