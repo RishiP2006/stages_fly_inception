@@ -7,145 +7,132 @@ import av
 import base64
 import time
 
+# ─── Page Setup ────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Drosophila Stage Detection", layout="centered")
 st.title("Drosophila Stage Detection (Live + Upload)")
-st.write("Using deployed InceptionV3 model for inference.")
+st.write("Upload an image or use your webcam. Select a stage, and get a beep when it matches.")
 
-# === Hugging Face model info ===
+# ─── Model & Labels ───────────────────────────────────────────────────────────
 HF_REPO_ID = "RishiPTrial/my-model-name"
 MODEL_FILE = "drosophila_inceptionv3_classifier.h5"
-
-# === Life stage labels ===
 STAGE_LABELS = [
-    "egg",
-    "1st instar",
-    "2nd instar",
-    "3rd instar",
-    "white pupa",
-    "brown pupa",
-    "eye pupa"
+    "egg", "1st instar", "2nd instar", "3rd instar",
+    "white pupa", "brown pupa", "eye pupa"
 ]
 
-# === Dropdown ===
-selected_stage = st.selectbox("🎯 Select stage to detect", STAGE_LABELS)
+# ─── Dropdown to select target stage ─────────────────────────────────────────
+selected_stage = st.selectbox("🎯 Select stage to alert on:", STAGE_LABELS)
 
-# === Audio beep logic ===
-def play_beep():
-    beep = """
-    <audio autoplay>
-        <source src="data:audio/wav;base64,{0}" type="audio/wav">
-    </audio>
-    """.format(beep_base64())
-    st.components.v1.html(beep, height=0)
+# ─── Shared flag for live beeps ──────────────────────────────────────────────
+if "live_match" not in st.session_state:
+    st.session_state["live_match"] = False
 
+# ─── Beep generation & playback ──────────────────────────────────────────────
 def beep_base64():
-    import io
-    import wave
-    import struct
+    import io, wave, struct
     buffer = io.BytesIO()
     with wave.open(buffer, 'wb') as f:
         f.setnchannels(1)
         f.setsampwidth(2)
         f.setframerate(44100)
-        duration = 0.5
-        freq = 680
-        volume = 0.85
+        duration, freq, volume = 0.5, 700, 0.8
         samples = [
             int(volume * 32767 * np.sin(2 * np.pi * freq * t / 44100))
             for t in range(int(44100 * duration))
         ]
-        f.writeframes(b''.join([struct.pack('<h', s) for s in samples]))
-    return base64.b64encode(buffer.getvalue()).decode('utf-8')
+        f.writeframes(b''.join(struct.pack('<h', s) for s in samples))
+    return base64.b64encode(buffer.getvalue()).decode()
 
-# === Load model from Hugging Face ===
-@st.cache_resource(show_spinner=False)
+def play_beep():
+    """Inject an audio tag to play the beep once."""
+    b64 = beep_base64()
+    html = f"""
+    <audio autoplay>
+      <source src="data:audio/wav;base64,{b64}" type="audio/wav">
+    </audio>
+    """
+    st.components.v1.html(html, height=0)
+
+# ─── Load Keras model ─────────────────────────────────────────────────────────
+@st.cache_resource
 def load_model():
-    try:
-        path = hf_hub_download(repo_id=HF_REPO_ID, filename=MODEL_FILE)
-    except Exception as e:
-        st.error(f"Error downloading model: {e}")
-        return None
-    try:
-        import keras
-        from keras.models import load_model
-        model = load_model(path, compile=False)
-        return {"model": model, "input_size": 299}
-    except Exception as e:
-        st.error(f"Failed to load model: {e}")
-        return None
+    path = hf_hub_download(repo_id=HF_REPO_ID, filename=MODEL_FILE)
+    from tensorflow.keras.models import load_model as lm
+    return lm(path, compile=False), 299
 
-model_info = load_model()
-if model_info is None:
-    st.stop()
-model = model_info["model"]
+model, input_size = load_model()
 
-# === Image preprocessing ===
-def preprocess_image(img: Image.Image, size: int):
-    from keras.applications.inception_v3 import preprocess_input
-    arr = img.resize((size, size)).convert("RGB")
-    x = np.asarray(arr).astype(np.float32)
-    x = preprocess_input(x)
-    return x
+# ─── Preprocess & classify helpers ────────────────────────────────────────────
+from tensorflow.keras.applications.inception_v3 import preprocess_input
 
-# === Prediction logic ===
-def classify(model, arr: np.ndarray):
-    x = np.expand_dims(arr, axis=0)
-    return model.predict(x)
+def preprocess_image(img: Image.Image) -> np.ndarray:
+    img = img.resize((input_size, input_size)).convert("RGB")
+    arr = np.asarray(img, np.float32)
+    return preprocess_input(arr)
 
-def interpret_class(preds):
-    arr = np.asarray(preds)
-    if arr.ndim == 2 and arr.shape[1] == len(STAGE_LABELS):
-        idx = int(np.argmax(arr, axis=1)[0])
-        return STAGE_LABELS[idx], float(arr[0][idx])
-    return None, None
+def classify(arr: np.ndarray):
+    preds = model.predict(arr[np.newaxis], verbose=0)[0]
+    idx = int(np.argmax(preds))
+    return STAGE_LABELS[idx], float(preds[idx])
 
-# === Upload image section ===
+# ─── Upload Image Section ─────────────────────────────────────────────────────
 st.subheader("📷 Upload Image for Detection")
-img_file = st.file_uploader("Upload image", type=["jpg", "jpeg", "png"])
-if img_file:
-    pil = Image.open(img_file).convert("RGB")
+uploaded = st.file_uploader(
+    label="Choose an image...",
+    type=["jpg","jpeg","png"],
+    label_visibility="visible"
+)
+if uploaded:
+    pil = Image.open(uploaded).convert("RGB")
     st.image(pil, use_column_width=True)
-    arr = preprocess_image(pil, model_info["input_size"])
-    preds = classify(model, arr)
-    label, conf = interpret_class(preds)
-    st.write("🔍 Raw prediction:", preds)
-    if label:
-        st.success(f"✅ Prediction: {label} ({conf:.1%})")
-        if label == selected_stage:
-            play_beep()
+    arr = preprocess_image(pil)
+    label, conf = classify(arr)
+    st.success(f"✅ Prediction: **{label}** ({conf:.1%})")
+    if label == selected_stage:
+        play_beep()
 
-# === Live camera processing ===
+# ─── Live Camera Section ──────────────────────────────────────────────────────
+st.subheader("📹 Live Camera Detection")
+video_placeholder = st.empty()
+
 class LiveProcessor(VideoProcessorBase):
     def __init__(self):
-        self.model = model
-        self.size = model_info["input_size"]
-        self.last_beep_time = 0
+        self.last_time = 0.0
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img = frame.to_ndarray(format="rgb24")
         pil = Image.fromarray(img)
-        arr = preprocess_image(pil, self.size)
-        preds = classify(self.model, arr)
-        label, conf = interpret_class(preds)
+        arr = preprocess_image(pil)
+        label, conf = classify(arr)
 
+        # Draw overlay
         draw = ImageDraw.Draw(pil)
-        if label:
-            draw.text((10, 10), f"{label} ({conf:.0%})", fill="red")
-            if label == selected_stage:
-                now = time.time()
-                if now - self.last_beep_time > 2:  # Beep at most every 2s
-                    self.last_beep_time = now
-                    play_beep()
+        draw.text((10,10), f"{label} ({conf:.0%})", fill="red")
+
+        # If match and >2s since last, set flag
+        now = time.time()
+        if label == selected_stage and (now - self.last_time) > 2.0:
+            self.last_time = now
+            st.session_state["live_match"] = True
+
         return av.VideoFrame.from_ndarray(np.array(pil), format="rgb24")
 
-st.subheader("📹 Live Camera Detection")
 webrtc_streamer(
     key="live-dros-stage",
     mode=WebRtcMode.SENDRECV,
     media_stream_constraints={"video": True, "audio": False},
     video_processor_factory=LiveProcessor,
     async_processing=True,
+    video_frame_callback=lambda frame: video_placeholder.image(
+        frame.to_ndarray(format="rgb24"),
+        channels="RGB"
+    )
 )
+
+# ─── After live stream: play beep if flagged ────────────────────────────────
+if st.session_state["live_match"]:
+    st.session_state["live_match"] = False
+    play_beep()
 
 st.markdown("---")
 st.write(f"Model: `{HF_REPO_ID}/{MODEL_FILE}`")
