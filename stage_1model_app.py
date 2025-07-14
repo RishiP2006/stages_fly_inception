@@ -93,7 +93,6 @@ if uploaded:
 
 # ─── Live Camera Section ──────────────────────────────────────────────────────
 st.subheader("📹 Live Camera Detection")
-video_placeholder = st.empty()
 
 class LiveProcessor(VideoProcessorBase):
     def __init__(self):
@@ -107,7 +106,7 @@ class LiveProcessor(VideoProcessorBase):
 
         # Draw overlay
         draw = ImageDraw.Draw(pil)
-        draw.text((10,10), f"{label} ({conf:.0%})", fill="red")
+        draw.text((10, 10), f"{label} ({conf:.0%})", fill="red")
 
         # If match and >2s since last, set flag
         now = time.time()
@@ -117,16 +116,13 @@ class LiveProcessor(VideoProcessorBase):
 
         return av.VideoFrame.from_ndarray(np.array(pil), format="rgb24")
 
-webrtc_streamer(
+# **Remove** video_frame_callback so WebRTC shows continuous frames
+ctx = webrtc_streamer(
     key="live-dros-stage",
     mode=WebRtcMode.SENDRECV,
     media_stream_constraints={"video": True, "audio": False},
     video_processor_factory=LiveProcessor,
     async_processing=True,
-    video_frame_callback=lambda frame: video_placeholder.image(
-        frame.to_ndarray(format="rgb24"),
-        channels="RGB"
-    )
 )
 
 # ─── After live stream: play beep if flagged ────────────────────────────────
