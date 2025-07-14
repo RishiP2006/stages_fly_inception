@@ -2,82 +2,89 @@ import streamlit as st
 import numpy as np
 from PIL import Image, ImageDraw
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
-import av, time
+import av
+from huggingface_hub import hf_hub_download
+from tensorflow.keras.models import load_model as lm
+from tensorflow.keras.applications.inception_v3 import preprocess_input
 
-# ─── Page Setup ─────────────────────────────────────────
-st.set_page_config(page_title="Stable Live Prediction", layout="centered")
-st.title("Live Drosophila Stage (Stable 3‑Frame)")
-
-# ─── Model & Helpers ────────────────────────────────────
-# (reuse your load_model(), preprocess_image(), classify() from before)
+# ─── Model Load ───────────────────────────
+HF_REPO_ID = "RishiPTrial/my-model-name"
+MODEL_FILE = "drosophila_inceptionv3_classifier.h5"
+STAGE_LABELS = [
+    "egg", "1st instar", "2nd instar", "3rd instar",
+    "white pupa", "brown pupa", "eye pupa"
+]
 
 @st.cache_resource
 def load_model():
-    # ... your huggingface load here ...
-    model = ...  # loaded Keras model
-    return model, 299
+    path = hf_hub_download(repo_id=HF_REPO_ID, filename=MODEL_FILE)
+    return lm(path, compile=False), 299
 
 model, input_size = load_model()
 
 def preprocess_image(pil: Image.Image):
-    img = pil.resize((input_size, input_size)).convert("RGB")
-    arr = np.asarray(img, np.float32)
-    from tensorflow.keras.applications.inception_v3 import preprocess_input
+    pil = pil.resize((input_size, input_size)).convert("RGB")
+    arr = np.asarray(pil, np.float32)
     return preprocess_input(arr)
 
-def classify(arr: np.ndarray):
+def classify(pil: Image.Image):
+    arr = preprocess_image(pil)
     preds = model.predict(arr[np.newaxis], verbose=0)[0]
     idx = int(np.argmax(preds))
-    label = STAGE_LABELS[idx]
-    return label
+    return STAGE_LABELS[idx], float(preds[idx])
 
-# ─── Session State for stability ────────────────────────
-if "live_last_label" not in st.session_state:
-    st.session_state["live_last_label"] = None
-    st.session_state["live_count"]      = 0
-    st.session_state["stable_label"]    = None
+# ─── UI Setup ─────────────────────────────
+st.set_page_config(layout="centered")
+st.title("Live Drosophila Detection")
+st.subheader("📹 Live Camera Detection with Stable Prediction")
 
-# ─── Live Processor ─────────────────────────────────────
-STAGE_LABELS = [
-    "egg","1st instar","2nd instar","3rd instar",
-    "white pupa","brown pupa","eye pupa"
-]
+# ─── Session State to Display Result ─────
+if "stable_prediction" not in st.session_state:
+    st.session_state["stable_prediction"] = "Waiting..."
 
+# ─── Video Processor ─────────────────────
 class StableProcessor(VideoProcessorBase):
+    def __init__(self):
+        self.last_label = None
+        self.count = 0
+        self.stable_label = None
+
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img = frame.to_ndarray(format="rgb24")
         pil = Image.fromarray(img)
-        label = classify(preprocess_image(pil))
 
-        # stability logic
-        if label == st.session_state["live_last_label"]:
-            st.session_state["live_count"] += 1
+        label, conf = classify(pil)
+
+        # Check stability
+        if label == self.last_label:
+            self.count += 1
         else:
-            st.session_state["live_last_label"] = label
-            st.session_state["live_count"] = 1
+            self.last_label = label
+            self.count = 1
 
-        if st.session_state["live_count"] >= 3:
-            st.session_state["stable_label"] = label
+        # Update stable label
+        if self.count >= 3:
+            self.stable_label = label
 
-        # draw overlay every frame
+        # Draw current prediction
         draw = ImageDraw.Draw(pil)
-        draw.text((10,10), label, fill="red")
+        draw.text((10, 10), f"{label} ({conf:.0%})", fill="red")
+
+        # Store stable label to Streamlit (from main thread only)
+        if self.stable_label:
+            st.session_state["stable_prediction"] = self.stable_label
 
         return av.VideoFrame.from_ndarray(np.array(pil), format="rgb24")
 
-# ─── Stream & Display ───────────────────────────────────
+# ─── Stream Setup ────────────────────────
 webrtc_ctx = webrtc_streamer(
-    key="stable-live",
+    key="live",
     mode=WebRtcMode.SENDRECV,
     media_stream_constraints={"video": True, "audio": False},
     video_processor_factory=StableProcessor,
     async_processing=True
 )
 
-# ─── Show the 3‑frame‑stable result ─────────────────────
-st.markdown("### Stable prediction (3 consecutive frames):")
-stable = st.session_state.get("stable_label")
-if stable:
-    st.success(f"🔒 {stable}")
-else:
-    st.info("Waiting for a stable 3‑frame prediction…")
+# ─── Show Stable Label ───────────────────
+st.markdown("### 🧠 Stable Prediction (after 3 consistent frames):")
+st.success(st.session_state.get("stable_prediction", "Waiting..."))
