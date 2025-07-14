@@ -4,26 +4,32 @@ from PIL import Image, ImageDraw
 from huggingface_hub import hf_hub_download
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
 import av, time, io, wave, struct, base64
+from tensorflow.keras.applications.inception_v3 import preprocess_input
 
-# ─── Page Setup ───────────────────────────────────────────────────────────────
+# ─── Page Setup ─────────────────────────────────────────
 st.set_page_config(page_title="Drosophila Stage Detection", layout="centered")
 st.title("Drosophila Stage Detection (Live + Upload)")
 st.write("Upload an image or use your webcam. Select a stage, and get a beep when it matches.")
 
-# ─── Model Info ───────────────────────────────────────────────────────────────
-HF_REPO_ID    = "RishiPTrial/my-model-name"
-MODEL_FILE    = "drosophila_inceptionv3_classifier.h5"
-STAGE_LABELS  = ["egg","1st instar","2nd instar","3rd instar","white pupa","brown pupa","eye pupa"]
+# ─── Model Info ─────────────────────────────────────────
+HF_REPO_ID = "RishiPTrial/my-model-name"
+MODEL_FILE = "drosophila_inceptionv3_classifier.h5"
+STAGE_LABELS = [
+    "egg", "1st instar", "2nd instar", "3rd instar",
+    "white pupa", "brown pupa", "eye pupa"
+]
 selected_stage = st.selectbox("🎯 Select stage to alert on:", STAGE_LABELS)
 
 if "live_match" not in st.session_state:
     st.session_state["live_match"] = False
 
-# ─── Prepare Base64 Beep ──────────────────────────────────────────────────────
+# ─── Beep Generation (Base64+JS) ────────────────────────
 def make_beep_base64():
     buf = io.BytesIO()
-    with wave.open(buf,'wb') as wf:
-        wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(44100)
+    with wave.open(buf, 'wb') as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(44100)
         duration, freq, volume = 0.2, 800, 0.8
         samples = [
             int(volume * 32767 * np.sin(2 * np.pi * freq * t / 44100))
@@ -40,15 +46,19 @@ def play_beep_js(loop_count=5, gap=100):
       const beepData = "data:audio/wav;base64,{BEEP_BASE64}";
       let count = 0;
       function playBeep() {{
-        new Audio(beepData).play().catch(console.warn);
-        if(++count < {loop_count}) setTimeout(playBeep, {gap});
+        const audio = new Audio(beepData);
+        audio.play().catch(e => console.warn("Beep error:", e));
+        count++;
+        if (count < {loop_count}) {{
+          setTimeout(playBeep, {gap});
+        }}
       }}
       playBeep();
     </script>
     """
     st.components.v1.html(js, height=0)
 
-# ─── Load Model ───────────────────────────────────────────────────────────────
+# ─── Load Model ─────────────────────────────────────────
 @st.cache_resource
 def load_model():
     path = hf_hub_download(repo_id=HF_REPO_ID, filename=MODEL_FILE)
@@ -57,11 +67,9 @@ def load_model():
 
 model, input_size = load_model()
 
-# ─── Helpers ─────────────────────────────────────────────────────────────────
-from tensorflow.keras.applications.inception_v3 import preprocess_input
-
+# ─── Helper Functions ──────────────────────────────────
 def preprocess_image(img):
-    img = img.resize((input_size,input_size)).convert("RGB")
+    img = img.resize((input_size, input_size)).convert("RGB")
     arr = np.asarray(img, np.float32)
     return preprocess_input(arr)
 
@@ -70,18 +78,19 @@ def classify(arr):
     idx = int(np.argmax(preds))
     return STAGE_LABELS[idx], float(preds[idx])
 
-# ─── Image Upload ─────────────────────────────────────────────────────────────
+# ─── Upload Image ──────────────────────────────────────
 st.subheader("📷 Upload Image for Detection")
-uploaded = st.file_uploader("Choose an image...", type=["jpg","jpeg","png"])
+uploaded = st.file_uploader("Choose an image...", type=["jpg", "jpeg", "png"])
 if uploaded:
     pil = Image.open(uploaded).convert("RGB")
     st.image(pil, use_column_width=True)
-    label, conf = classify(preprocess_image(pil))
+    arr = preprocess_image(pil)
+    label, conf = classify(arr)
     st.success(f"✅ Prediction: **{label}** ({conf:.1%})")
     if label == selected_stage:
         play_beep_js()
 
-# ─── Live Camera ──────────────────────────────────────────────────────────────
+# ─── Live Camera ───────────────────────────────────────
 st.subheader("📹 Live Camera Detection")
 
 class LiveProcessor(VideoProcessorBase):
@@ -90,40 +99,52 @@ class LiveProcessor(VideoProcessorBase):
         self.last_time   = 0.0
         self.last_label  = None
         self.last_conf   = 0.0
+        self.match_counter = 0
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img = frame.to_ndarray(format="rgb24")
         pil = Image.fromarray(img)
         self.frame_count += 1
 
+        # Only process every 3rd frame for speed
         if self.frame_count % 3 == 0:
-            label, conf = classify(preprocess_image(pil))
-            self.last_label, self.last_conf = label, conf
+            arr = preprocess_image(pil)
+            label, conf = classify(arr)
+            self.last_label = label
+            self.last_conf = conf
 
+            # Count consistent matches
+            if label == selected_stage:
+                self.match_counter += 1
+            else:
+                self.match_counter = 0
+
+            # Trigger beep on 3 consistent matches and time gap
             now = time.time()
-            if label == selected_stage and now - self.last_time > 2.0:
+            if self.match_counter >= 3 and now - self.last_time > 2.0:
                 self.last_time = now
                 st.session_state["live_match"] = True
+                self.match_counter = 0
 
+        # Draw overlay text
         if self.last_label:
             draw = ImageDraw.Draw(pil)
-            draw.text((10,10), f"{self.last_label} ({self.last_conf:.0%})", fill="red")
+            draw.text((10, 10), f"{self.last_label} ({self.last_conf:.0%})", fill="red")
 
         return av.VideoFrame.from_ndarray(np.array(pil), format="rgb24")
 
 webrtc_streamer(
     key="live-dros-stage",
     mode=WebRtcMode.SENDRECV,
-    media_stream_constraints={"video":True,"audio":False},
+    media_stream_constraints={"video": True, "audio": False},
     video_processor_factory=LiveProcessor,
     async_processing=True,
 )
 
-# ─── Play beep if live match ─────────────────────────────────────────────────
+# ─── Beep trigger after live ───────────────────────────
 if st.session_state["live_match"]:
     st.session_state["live_match"] = False
     play_beep_js()
-    st.experimental_rerun()  # force a rerun so the browser executes the JS immediately
 
 st.markdown("---")
 st.write(f"Model: `{HF_REPO_ID}/{MODEL_FILE}`")
