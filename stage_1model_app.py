@@ -1,4 +1,5 @@
 import streamlit as st
+st.set_page_config(layout="centered")
 import numpy as np
 from PIL import Image, ImageDraw
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
@@ -34,7 +35,7 @@ def classify(pil: Image.Image):
     return STAGE_LABELS[idx], float(preds[idx])
 
 # ─── UI Setup ─────────────────────────────
-st.set_page_config(layout="centered")
+
 st.title("Live Drosophila Detection")
 st.subheader("📹 Live Camera Detection with Stable Prediction")
 
