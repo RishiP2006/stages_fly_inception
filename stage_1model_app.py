@@ -3,9 +3,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 from huggingface_hub import hf_hub_download
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
-import av
-import base64
-import time
+import av, time, base64, io, wave, struct
 
 # ─── Page Setup ────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Drosophila Stage Detection", layout="centered")
@@ -28,30 +26,20 @@ if "live_match" not in st.session_state:
     st.session_state["live_match"] = False
 
 # ─── Beep generation & playback ──────────────────────────────────────────────
-def beep_base64():
-    import io, wave, struct
-    buffer = io.BytesIO()
-    with wave.open(buffer, 'wb') as f:
-        f.setnchannels(1)
-        f.setsampwidth(2)
-        f.setframerate(44100)
-        duration, freq, volume = 0.5, 700, 0.8
-        samples = [
-            int(volume * 32767 * np.sin(2 * np.pi * freq * t / 44100))
-            for t in range(int(44100 * duration))
-        ]
-        f.writeframes(b''.join(struct.pack('<h', s) for s in samples))
-    return base64.b64encode(buffer.getvalue()).decode()
+def make_beep_wav():
+    buf = io.BytesIO()
+    with wave.open(buf, 'wb') as wf:
+        wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(44100)
+        duration, freq, volume = 0.3, 700, 0.8
+        samples = [int(volume*32767*np.sin(2*np.pi*freq*t/44100))
+                   for t in range(int(44100*duration))]
+        wf.writeframes(b''.join(struct.pack('<h', s) for s in samples))
+    return buf.getvalue()
+
+beep_wav = make_beep_wav()
 
 def play_beep():
-    """Inject an audio tag to play the beep once."""
-    b64 = beep_base64()
-    html = f"""
-    <audio autoplay>
-      <source src="data:audio/wav;base64,{b64}" type="audio/wav">
-    </audio>
-    """
-    st.components.v1.html(html, height=0)
+    st.audio(beep_wav, format="audio/wav", start_time=0)
 
 # ─── Load Keras model ─────────────────────────────────────────────────────────
 @st.cache_resource
@@ -77,11 +65,7 @@ def classify(arr: np.ndarray):
 
 # ─── Upload Image Section ─────────────────────────────────────────────────────
 st.subheader("📷 Upload Image for Detection")
-uploaded = st.file_uploader(
-    label="Choose an image...",
-    type=["jpg","jpeg","png"],
-    label_visibility="visible"
-)
+uploaded = st.file_uploader("Choose an image...", type=["jpg","jpeg","png"])
 if uploaded:
     pil = Image.open(uploaded).convert("RGB")
     st.image(pil, use_column_width=True)
@@ -96,7 +80,7 @@ st.subheader("📹 Live Camera Detection")
 
 class LiveProcessor(VideoProcessorBase):
     def __init__(self):
-        self.last_time = 0.0
+        self.last_time = 0
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img = frame.to_ndarray(format="rgb24")
@@ -108,21 +92,21 @@ class LiveProcessor(VideoProcessorBase):
         draw = ImageDraw.Draw(pil)
         draw.text((10, 10), f"{label} ({conf:.0%})", fill="red")
 
-        # If match and >2s since last, set flag
+        # Set flag on match
         now = time.time()
-        if label == selected_stage and (now - self.last_time) > 2.0:
+        if label == selected_stage and now - self.last_time > 2.0:
             self.last_time = now
             st.session_state["live_match"] = True
 
         return av.VideoFrame.from_ndarray(np.array(pil), format="rgb24")
 
-# **Remove** video_frame_callback so WebRTC shows continuous frames
-ctx = webrtc_streamer(
+webrtc_streamer(
     key="live-dros-stage",
     mode=WebRtcMode.SENDRECV,
     media_stream_constraints={"video": True, "audio": False},
     video_processor_factory=LiveProcessor,
-    async_processing=True,
+    async_processing=False,   # <= synchronous processing avoids freezing
+    rtc_configuration={"iceServers":[{"urls":["stun:stun.l.google.com:19302"]}]}
 )
 
 # ─── After live stream: play beep if flagged ────────────────────────────────
