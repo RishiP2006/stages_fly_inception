@@ -2,112 +2,105 @@ import streamlit as st
 import numpy as np
 from PIL import Image, ImageDraw
 from huggingface_hub import hf_hub_download
-from streamlit_webrtc import VideoProcessorBase, webrtc_streamer, WebRtcMode
-import av, time, io, wave, struct, base64
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
+import av, time, itertools
 from tensorflow.keras.applications.inception_v3 import preprocess_input
 
-# ─── Page Setup ───────────────────────────────────────────────────────────
+# ─── Page Setup ─────────────────────────────────────────────────
 st.set_page_config(page_title="Drosophila Stage Detection", layout="centered")
-st.title("Drosophila Stage Detection (Live + Upload)")
-st.write("First, unlock audio; then upload or go live to hear beeps!")
+st.title("🪰 Drosophila Stage Detection (Live + Upload)")
+st.write("Allow notifications once, then any match will pop up a desktop notification + on‑screen alert.")
 
-# ─── Audio Unlock Section ───────────────────────────────────────────────────
-if "audio_unlocked" not in st.session_state:
-    st.session_state["audio_unlocked"] = False
+# ─── Notification Permission Request ────────────────────────────
+if "notif_enabled" not in st.session_state:
+    st.session_state["notif_enabled"] = False
 
-def make_silence_wav():
-    buf = io.BytesIO()
-    with wave.open(buf,'wb') as wf:
-        wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(44100)
-        wf.writeframes(b'')  # no data = silence
-    return base64.b64encode(buf.getvalue()).decode()
-
-SILENCE_B64 = make_silence_wav()
-
-if not st.session_state["audio_unlocked"]:
-    st.warning("🔊 Click below to enable sound alerts")
-    if st.button("Enable Sound Alerts"):
-        # play a silent clip to unlock the audio context
-        st.components.v1.html(f"""
-            <audio id="unlock" autoplay>
-              <source src="data:audio/wav;base64,{SILENCE_B64}" type="audio/wav">
-            </audio>""", height=0)
-        st.session_state["audio_unlocked"] = True
+if not st.session_state["notif_enabled"]:
+    st.warning("🔔 Click to enable desktop notifications")
+    if st.button("Enable Notifications"):
+        st.experimental_set_query_params(_=itertools.count())  # force a re‑run
+        st.write("""
+        <script>
+          Notification.requestPermission().then(status => {
+            window.parent.postMessage({ notif: status }, "*");
+          });
+        </script>
+        """, unsafe_allow_html=True)
+        st.session_state["notif_enabled"] = True
         st.experimental_rerun()
     st.stop()
 
-# ─── Embed persistent <audio> for beeps ──────────────────────────────────────
-def make_beep_b64():
-    buf = io.BytesIO()
-    with wave.open(buf,'wb') as wf:
-        wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(44100)
-        d,f,v = 0.2,800,0.8
-        s = [int(v*32767*np.sin(2*np.pi*f*t/44100)) for t in range(int(44100*d))]
-        wf.writeframes(b''.join(struct.pack('<h', x) for x in s))
-    return base64.b64encode(buf.getvalue()).decode()
+# ─── JS Alert Function ───────────────────────────────────────────
+def notify_js(title, message):
+    js = f"""
+    <script>
+      if (Notification.permission === 'granted') {{
+        new Notification("{title}", {{ body: "{message}" }});
+      }}
+    </script>
+    """
+    st.components.v1.html(js, height=0)
 
-BEEP_B64 = make_beep_b64()
+# ─── On‑screen banner ─────────────────────────────────────────────
+def show_banner(msg):
+    st.markdown(f"""
+    <div style="background:#ff4b4b;color:white;padding:10px;
+                border-radius:8px;margin:10px 0;font-size:18px;">
+      🚨 {msg}
+    </div>
+    """, unsafe_allow_html=True)
 
-# inject once
-st.components.v1.html(f"""
-  <audio id="beeper" src="data:audio/wav;base64,{BEEP_B64}"></audio>
-""", height=0)
-
-def beep():
-    st.components.v1.html("""
-      <script>
-        document.getElementById('beeper').play();
-      </script>
-    """, height=0)
-
-# ─── Model & Labels ─────────────────────────────────────────────────────────
+# ─── Model & Helpers ─────────────────────────────────────────────
 HF_REPO_ID = "RishiPTrial/my-model-name"
 MODEL_FILE = "drosophila_inceptionv3_classifier.h5"
 STAGES = ["egg","1st instar","2nd instar","3rd instar","white pupa","brown pupa","eye pupa"]
 sel = st.selectbox("Select stage to alert on:", STAGES)
 
-# ─── Load model ─────────────────────────────────────────────────────────────
 @st.cache_resource
 def load_model():
     p = hf_hub_download(repo_id=HF_REPO_ID, filename=MODEL_FILE)
     from tensorflow.keras.models import load_model as lm
     return lm(p, compile=False), 299
+
 model, sz = load_model()
 
-def predict(img_pil):
-    arr = preprocess_input(np.asarray(img_pil.resize((sz,sz)).convert("RGB"), np.float32)[None])
+def predict(pil):
+    img = np.asarray(pil.resize((sz,sz)).convert("RGB"), np.float32)
+    arr = preprocess_input(img[None])
     preds = model.predict(arr, verbose=0)[0]
     idx = int(np.argmax(preds))
     return STAGES[idx], preds[idx]
 
-# ─── Upload Section ─────────────────────────────────────────────────────────
+# ─── Upload Section ──────────────────────────────────────────────
 st.subheader("📷 Upload Image")
-up = st.file_uploader("", type=["jpg","png","jpeg"])
+up = st.file_uploader("", type=["jpg","jpeg","png"])
 if up:
-    im = Image.open(up).convert("RGB")
-    st.image(im, use_column_width=True)
-    label, conf = predict(im)
-    st.success(f"{label} ({conf:.1%})")
-    if label==sel:
-        beep()
+    pil = Image.open(up).convert("RGB")
+    st.image(pil, use_column_width=True)
+    lbl, cf = predict(pil)
+    st.success(f"{lbl} ({cf:.1%})")
+    if lbl == sel:
+        notify_js("Drosophila Match!", f"{lbl} ({cf:.1%})")
+        show_banner(f"Upload matched: {lbl} ({cf:.1%})")
 
-# ─── Live Section ───────────────────────────────────────────────────────────
-st.subheader("📹 Live Camera")
-class Proc(VideoProcessorBase):
+# ─── Live Section ────────────────────────────────────────────────
+st.subheader("📹 Live Camera Detection")
+class P(VideoProcessorBase):
     def recv(self, frame: av.VideoFrame):
         img = frame.to_ndarray(format="rgb24")
         pil = Image.fromarray(img)
         lbl, cf = predict(pil)
         draw = ImageDraw.Draw(pil)
-        draw.text((10,10), f"{lbl} {cf:.0%}", fill="red")
-        if lbl==sel:
-            beep()
+        draw.text((10,10), f"{lbl} ({cf:.0%})", fill="red")
+        if lbl == sel:
+            notify_js("Drosophila Live Match!", f"{lbl} ({cf:.1%})")
+            show_banner(f"Live matched: {lbl} ({cf:.1%})")
         return av.VideoFrame.from_ndarray(np.array(pil), format="rgb24")
 
 webrtc_streamer(
     key="live",
     mode=WebRtcMode.SENDRECV,
     media_stream_constraints={"video":True,"audio":False},
-    video_processor_factory=Proc,
+    video_processor_factory=P,
     async_processing=True
 )
