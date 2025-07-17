@@ -35,15 +35,14 @@ def classify(pil: Image.Image):
     return STAGE_LABELS[idx], float(preds[idx])
 
 # ─── UI Setup ─────────────────────────────
-
 st.title("Live Drosophila Detection")
 st.subheader("📹 Live Camera Detection with Stable Prediction")
 
-# ─── Session State to Display Result ─────
+# ─── Global Storage for Stable Prediction ─
 if "stable_prediction" not in st.session_state:
     st.session_state["stable_prediction"] = "Waiting..."
 
-# ─── Video Processor ─────────────────────
+# ─── Video Processor ──────────────────────
 class StableProcessor(VideoProcessorBase):
     def __init__(self):
         self.last_label = None
@@ -56,28 +55,21 @@ class StableProcessor(VideoProcessorBase):
 
         label, conf = classify(pil)
 
-        # Check stability
         if label == self.last_label:
             self.count += 1
         else:
             self.last_label = label
             self.count = 1
 
-        # Update stable label
         if self.count >= 3:
             self.stable_label = label
 
-        # Draw current prediction
         draw = ImageDraw.Draw(pil)
         draw.text((10, 10), f"{label} ({conf:.0%})", fill="red")
 
-        # Store stable label to Streamlit (from main thread only)
-        if self.stable_label:
-            st.session_state["stable_prediction"] = self.stable_label
-
         return av.VideoFrame.from_ndarray(np.array(pil), format="rgb24")
 
-# ─── Stream Setup ────────────────────────
+# ─── Stream Setup ─────────────────────────
 webrtc_ctx = webrtc_streamer(
     key="live",
     mode=WebRtcMode.SENDRECV,
@@ -86,6 +78,11 @@ webrtc_ctx = webrtc_streamer(
     async_processing=True
 )
 
-# ─── Show Stable Label ───────────────────
+# ─── Show Stable Label ────────────────────
+if webrtc_ctx and webrtc_ctx.video_processor:
+    processor = webrtc_ctx.video_processor
+    if processor and processor.stable_label:
+        st.session_state["stable_prediction"] = processor.stable_label
+
 st.markdown("### 🧠 Stable Prediction (after 3 consistent frames):")
 st.success(st.session_state.get("stable_prediction", "Waiting..."))
