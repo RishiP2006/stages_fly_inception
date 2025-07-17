@@ -1,5 +1,6 @@
 import streamlit as st
 st.set_page_config(layout="centered")
+
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
@@ -8,7 +9,7 @@ from huggingface_hub import hf_hub_download
 from tensorflow.keras.models import load_model as lm
 from tensorflow.keras.applications.inception_v3 import preprocess_input
 
-# ─── Model Load ───────────────────────────
+# ─── Load Model ────────────────────────────
 HF_REPO_ID = "RishiPTrial/my-model-name"
 MODEL_FILE = "drosophila_inceptionv3_classifier.h5"
 STAGE_LABELS = [
@@ -34,68 +35,65 @@ def classify(pil: Image.Image):
     idx = int(np.argmax(preds))
     return STAGE_LABELS[idx], float(preds[idx])
 
-# ─── UI Setup ─────────────────────────────
-
+# ─── UI ─────────────────────────────────────
 st.title("Live Drosophila Detection")
-st.subheader("📹 Live Camera Detection with Stable Prediction")
+st.subheader("📹 Live Camera Detection")
 
-# ─── Session State to Display Result ─────
-if "stable_prediction" not in st.session_state:
-    st.session_state["stable_prediction"] = "Waiting..."
+placeholder = st.empty()
 
-# ─── Video Processor ─────────────────────
-class StableProcessor(VideoProcessorBase):
+# ─── Video Processor ────────────────────────
+class VideoProcessor(VideoProcessorBase):
     def __init__(self):
-        self.last_label = None
-        self.count = 0
-        self.stable_label = None
+        self.frame_count = 0
+        self.pred_label = "Loading..."
+        self.confidence = 0.0
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+        self.frame_count += 1
         img = frame.to_ndarray(format="rgb24")
-        pil = Image.fromarray(img)
 
-        label, conf = classify(pil)
+        # Run prediction every 10 frames to reduce lag
+        if self.frame_count % 10 == 0:
+            pil_img = Image.fromarray(img)
+            label, conf = classify(pil_img)
+            self.pred_label = label
+            self.confidence = conf
 
-        # Check stability
-        if label == self.last_label:
-            self.count += 1
-        else:
-            self.last_label = label
-            self.count = 1
-
-        # Update stable label
-        if self.count >= 3:
-            self.stable_label = label
-
-        # Draw prediction with black background box
-        draw = ImageDraw.Draw(pil)
-        text = f"{label} ({conf:.0%})"
-
+        # Draw prediction
+        pil_img = Image.fromarray(img)
+        draw = ImageDraw.Draw(pil_img)
+        font_size = 30
         try:
-            font = ImageFont.truetype("DejaVuSans-Bold.ttf", size=36)
+            font = ImageFont.truetype("arial.ttf", font_size)
         except:
             font = ImageFont.load_default()
 
-        text_size = draw.textsize(text, font=font)
-        x, y = 10, 10
-        draw.rectangle([x, y, x + text_size[0] + 10, y + text_size[1] + 10], fill="black")
-        draw.text((x + 5, y + 5), text, fill="red", font=font)
+        text = f"{self.pred_label} ({self.confidence:.0%})"
+        text_size = draw.textbbox((0, 0), text, font=font)
+        text_width = text_size[2] - text_size[0]
+        text_height = text_size[3] - text_size[1]
 
-        # Save stable prediction
-        if self.stable_label:
-            st.session_state["stable_prediction"] = self.stable_label
+        # Draw black rectangle background
+        draw.rectangle([10, 10, 10 + text_width + 10, 10 + text_height + 10], fill="black")
+        draw.text((15, 15), text, font=font, fill="white")
 
-        return av.VideoFrame.from_ndarray(np.array(pil), format="rgb24")
+        # Update text in Streamlit (optional)
+        placeholder.success(f"🧠 Prediction: **{self.pred_label}** ({self.confidence:.0%})")
 
-# ─── Stream Setup ────────────────────────
+        return av.VideoFrame.from_ndarray(np.array(pil_img), format="rgb24")
+
+# ─── Start Stream ───────────────────────────
 webrtc_ctx = webrtc_streamer(
     key="live",
     mode=WebRtcMode.SENDRECV,
-    media_stream_constraints={"video": True, "audio": False},
-    video_processor_factory=StableProcessor,
+    media_stream_constraints={
+        "video": {
+            "width": {"ideal": 640},
+            "height": {"ideal": 480},
+            "frameRate": {"ideal": 30}
+        },
+        "audio": False
+    },
+    video_processor_factory=VideoProcessor,
     async_processing=True
 )
-
-# ─── Show Stable Label ───────────────────
-st.markdown("### 🧠 Stable Prediction (after 3 consistent frames):")
-st.success(st.session_state.get("stable_prediction", "Waiting..."))
