@@ -1,7 +1,7 @@
 import streamlit as st
 st.set_page_config(layout="centered")
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
 import av
 from huggingface_hub import hf_hub_download
@@ -35,14 +35,15 @@ def classify(pil: Image.Image):
     return STAGE_LABELS[idx], float(preds[idx])
 
 # ─── UI Setup ─────────────────────────────
+
 st.title("Live Drosophila Detection")
 st.subheader("📹 Live Camera Detection with Stable Prediction")
 
-# Placeholder to display stable prediction
-stable_placeholder = st.empty()
-stable_placeholder.markdown("### 🧠 Stable Prediction: Waiting...")
+# ─── Session State to Display Result ─────
+if "stable_prediction" not in st.session_state:
+    st.session_state["stable_prediction"] = "Waiting..."
 
-# ─── Video Processor ──────────────────────
+# ─── Video Processor ─────────────────────
 class StableProcessor(VideoProcessorBase):
     def __init__(self):
         self.last_label = None
@@ -55,39 +56,46 @@ class StableProcessor(VideoProcessorBase):
 
         label, conf = classify(pil)
 
+        # Check stability
         if label == self.last_label:
             self.count += 1
         else:
             self.last_label = label
             self.count = 1
 
+        # Update stable label
         if self.count >= 3:
             self.stable_label = label
 
+        # Draw prediction with black background box
         draw = ImageDraw.Draw(pil)
-        draw.text((10, 10), f"{label} ({conf:.0%})", fill="red")
+        text = f"{label} ({conf:.0%})"
 
-        # after processing, update placeholder from main thread
-        # use st.session_state to pass label out of callback
-        st.session_state['latest_label'] = self.stable_label or st.session_state.get('latest_label')
+        try:
+            font = ImageFont.truetype("DejaVuSans-Bold.ttf", size=36)
+        except:
+            font = ImageFont.load_default()
+
+        text_size = draw.textsize(text, font=font)
+        x, y = 10, 10
+        draw.rectangle([x, y, x + text_size[0] + 10, y + text_size[1] + 10], fill="black")
+        draw.text((x + 5, y + 5), text, fill="red", font=font)
+
+        # Save stable prediction
+        if self.stable_label:
+            st.session_state["stable_prediction"] = self.stable_label
 
         return av.VideoFrame.from_ndarray(np.array(pil), format="rgb24")
 
-# Initialize session_state key
-if 'latest_label' not in st.session_state:
-    st.session_state['latest_label'] = None
-
-# ─── Stream Setup ─────────────────────────
+# ─── Stream Setup ────────────────────────
 webrtc_ctx = webrtc_streamer(
     key="live",
     mode=WebRtcMode.SENDRECV,
     media_stream_constraints={"video": True, "audio": False},
     video_processor_factory=StableProcessor,
-    async_processing=False  # synchronous processing to allow UI updates
+    async_processing=True
 )
 
-# ─── Display updated stable prediction ────
-if st.session_state.get('latest_label'):
-    stable_placeholder.markdown(f"### 🧠 Stable Prediction: {st.session_state['latest_label']}")
-else:
-    stable_placeholder.markdown("### 🧠 Stable Prediction: Waiting...")
+# ─── Show Stable Label ───────────────────
+st.markdown("### 🧠 Stable Prediction (after 3 consistent frames):")
+st.success(st.session_state.get("stable_prediction", "Waiting..."))
