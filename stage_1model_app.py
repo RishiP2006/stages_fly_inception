@@ -38,9 +38,9 @@ def classify(pil: Image.Image):
 st.title("Live Drosophila Detection")
 st.subheader("📹 Live Camera Detection with Stable Prediction")
 
-# ─── Global Storage for Stable Prediction ─
-if "stable_prediction" not in st.session_state:
-    st.session_state["stable_prediction"] = "Waiting..."
+# Placeholder to display stable prediction
+stable_placeholder = st.empty()
+stable_placeholder.markdown("### 🧠 Stable Prediction: Waiting...")
 
 # ─── Video Processor ──────────────────────
 class StableProcessor(VideoProcessorBase):
@@ -67,7 +67,15 @@ class StableProcessor(VideoProcessorBase):
         draw = ImageDraw.Draw(pil)
         draw.text((10, 10), f"{label} ({conf:.0%})", fill="red")
 
+        # after processing, update placeholder from main thread
+        # use st.session_state to pass label out of callback
+        st.session_state['latest_label'] = self.stable_label or st.session_state.get('latest_label')
+
         return av.VideoFrame.from_ndarray(np.array(pil), format="rgb24")
+
+# Initialize session_state key
+if 'latest_label' not in st.session_state:
+    st.session_state['latest_label'] = None
 
 # ─── Stream Setup ─────────────────────────
 webrtc_ctx = webrtc_streamer(
@@ -75,14 +83,11 @@ webrtc_ctx = webrtc_streamer(
     mode=WebRtcMode.SENDRECV,
     media_stream_constraints={"video": True, "audio": False},
     video_processor_factory=StableProcessor,
-    async_processing=True
+    async_processing=False  # synchronous processing to allow UI updates
 )
 
-# ─── Show Stable Label ────────────────────
-if webrtc_ctx and webrtc_ctx.video_processor:
-    processor = webrtc_ctx.video_processor
-    if processor and processor.stable_label:
-        st.session_state["stable_prediction"] = processor.stable_label
-
-st.markdown("### 🧠 Stable Prediction (after 3 consistent frames):")
-st.success(st.session_state.get("stable_prediction", "Waiting..."))
+# ─── Display updated stable prediction ────
+if st.session_state.get('latest_label'):
+    stable_placeholder.markdown(f"### 🧠 Stable Prediction: {st.session_state['latest_label']}")
+else:
+    stable_placeholder.markdown("### 🧠 Stable Prediction: Waiting...")
